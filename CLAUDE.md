@@ -16,11 +16,11 @@
 **Input**: Digital text PDFs (LaTeX notes, typed Notability exports)
 **Output**: Q&A with cited sources + interactive concept graph
 
-## Current State: Phase 1 Complete & Tested ✅
+## Current State: Phase 2 Complete & Tested ✅
 
-**Last Updated**: 2025-11-28
+**Last Updated**: 2025-11-29
 
-**Status**: Fully operational RAG system with 57 chunks ingested from Unit_3_532.pdf
+**Status**: Fully operational RAG system with concept extraction, accurate cost tracking, and Cohere reranking
 
 ### What's Built and Working
 
@@ -29,13 +29,21 @@
    - Chunks: 800 tokens, 100 overlap
    - Extracts course/lecture from filename (regex: `CS331_Lecture12.pdf`)
    - Preserves page numbers
-2. `embeddings.py` - OpenAI embeddings with Redis caching + tenacity retries
+2. `embeddings.py` - OpenAI embeddings with Redis caching + token tracking
+   - Returns (embedding, tokens_used) tuples for cost tracking
+   - Redis cache saves ~95% costs on repeat queries
 3. `neo4j_client.py` - Async driver, vector search, graph queries
    - Vector index: `chunk_embeddings` (cosine similarity)
    - Cypher queries for RELATES_TO relationships
-4. `rag_pipeline.py` - Full retrieval → rerank → Claude generation
+   - `get_concepts_for_chunks()` for graph building
+4. `rag_pipeline.py` - Full retrieval → Cohere rerank → Claude generation
+   - **Cohere rerank-v3.5** with fallback to score filtering
    - Anti-hallucination prompting (from Vectorize blog)
-   - Relevance threshold: 0.5
+   - Accurate cost tracking from API token counts
+5. `concept_extractor.py` - Claude-powered concept extraction **NEW**
+   - Extracts 6 concept types: algorithm, topic, theory, technique, term, person
+   - JSON-structured output with confidence scores
+   - ~6-7 concepts per chunk average
 
 **API Endpoints** (`backend/app/api/routes/`):
 - `POST /query` - RAG query (question → answer + chunks + optional graph)
@@ -53,34 +61,40 @@
 
 **Verified Working**:
 - ✅ PDF ingestion: 57 chunks from Unit_3_532.pdf (26 pages, 31,942 chars)
-- ✅ Embeddings: OpenAI API with Redis caching (57 successful calls)
-- ✅ Neo4j storage: All chunks stored with 1536d vectors
-- ✅ Query pipeline: Tested with "K-Means algorithm" and "PCA" queries
-- ✅ Claude responses: Proper citations, anti-hallucination working
-- ✅ Cost tracking: ~$0.001-0.004 per query
+- ✅ Embeddings: OpenAI API with Redis caching + token tracking
+- ✅ Neo4j storage: Chunks + 372 concepts with relationships
+- ✅ Concept extraction: ~6.5 concepts/chunk, ~8min processing
+- ✅ Query pipeline: Tested with PCA, K-Means queries
+- ✅ Cohere reranking: Semantic relevance scoring working
+- ✅ Accurate cost tracking: $0.007866 per query (not estimate!)
+- ✅ Graph visualization: `/graph/{concept}` endpoint functional
 - ✅ Health checks: All services passing
 
-### What's Stubbed/Incomplete
+### What's Complete (Phase 2) ✅
 
-**Critical Gaps**:
-1. **Concept Extraction** (`rag_pipeline.py:118`) - `_build_concept_graph()` returns `None`
-   - Should: Extract concepts from chunks via Claude
-   - Should: Store in Neo4j as `(Concept)-[:MENTIONED_IN]->(Chunk)`
-   - Should: Create `RELATES_TO` edges between co-occurring concepts
-2. **Reranking** (`rag_pipeline.py:72`) - Simple score filtering only
-   - Should: Use Cohere rerank API or cross-encoder
-   - Currently: Just sorts by cosine similarity
-3. **Cost Tracking** (`rag_pipeline.py:213`) - Rough estimation
-   - Should: Track actual token counts from API responses
-4. **Graph Relationships** - No automatic concept linking yet
-   - Neo4j schema supports it, but ingestion doesn't populate
+1. **Concept Extraction** - Fully implemented
+   - Extracts concepts via Claude during ingestion
+   - Stores in Neo4j as `(Concept)-[:MENTIONED_IN]->(Chunk)`
+   - Creates `RELATES_TO` edges for chunk-level co-occurrence
+   - Weights increment when concepts appear together multiple times
 
-**Missing Features** (not blocking):
-- OCR for handwritten notes (future)
-- Conversation context/history
-- Rate limiting middleware
-- Frontend (Svelte app)
+2. **Cohere Reranking** - Production ready
+   - Uses `rerank-v3.5` multilingual model
+   - Graceful fallback to score filtering if API fails
+   - Significant relevance improvements over vector search alone
+
+3. **Accurate Cost Tracking** - Real-time tracking
+   - Tracks actual tokens from OpenAI & Claude APIs
+   - Pricing: $0.02/1M (embeddings), $3/$15/1M (Claude)
+   - Typical query: $0.007-0.012
+
+**Missing Features** (Phase 3+):
+- Frontend (Svelte app with graph visualization)
 - Fish.audio TTS integration
+- Conversation context/history
+- OCR for handwritten notes
+- Rate limiting middleware
+- Multi-user auth
 
 ## Architecture Decisions
 
@@ -96,17 +110,19 @@
 ```
 User Question
   ↓
-1. Embed query (OpenAI, cached)
+1. Embed query (OpenAI, cached) → track tokens
   ↓
 2. Vector search (Neo4j, top 20 chunks)
   ↓
-3. Rerank (simple score filter → should be Cohere)
+3. Cohere rerank (semantic relevance, top 5) → with fallback
   ↓
 4. Build context from top 5 chunks
   ↓
-5. Prompt Claude with anti-hallucination rules
+5. Prompt Claude with anti-hallucination rules → track tokens
   ↓
-6. Return answer + chunks + concept graph
+6. Build concept graph from stored concepts (optional)
+  ↓
+7. Calculate actual cost → return answer + chunks + graph + cost
 ```
 
 ### Key Patterns Used
@@ -212,19 +228,17 @@ cd backend && pytest
 
 ## Next Steps (Priority Order)
 
-### Immediate (Phase 2):
-1. **Implement concept extraction**:
-   - In `rag_pipeline.py:_build_concept_graph()`
-   - Prompt Claude to extract concepts from each chunk
-   - Store via `neo4j_client.store_concepts()`
-   - Build co-occurrence edges
-2. **Add Cohere reranking**:
-   - `uv pip install cohere`
-   - Replace `_rerank_chunks()` with Cohere API call
-   - Keep relevance threshold fallback
-3. **Fix cost tracking**:
-   - Parse token counts from Claude/OpenAI responses
-   - Log actual costs, not estimates
+### ✅ Completed (Phase 2):
+1. **Concept extraction** - DONE
+   - Claude-powered extraction in `concept_extractor.py`
+   - Stores 6 concept types with confidence scores
+   - Chunk-level co-occurrence relationships
+2. **Cohere reranking** - DONE
+   - `rerank-v3.5` multilingual model
+   - Graceful fallback to score filtering
+3. **Accurate cost tracking** - DONE
+   - Real token counts from API responses
+   - Current pricing: $0.007-0.012/query
 
 ### Medium Term (Phase 3):
 4. **Svelte Frontend**:
@@ -263,8 +277,9 @@ cd backend && pytest
 ## Environment Variables (from .env)
 
 Required:
-- `ANTHROPIC_API_KEY` - Claude API (configured)
-- `OPENAI_API_KEY` - Embeddings (configured)
+- `ANTHROPIC_API_KEY` - Claude API for generation & concept extraction
+- `OPENAI_API_KEY` - Embeddings API
+- `COHERE_API_KEY` - Reranking API (Phase 2)
 - `NEO4J_PASSWORD` - Neo4j auth (set to `corpus_secure_password_2025`)
 
 Models:
@@ -276,12 +291,20 @@ Optional:
 - `CHUNK_SIZE`, `CHUNK_OVERLAP` - Chunking params (800/100)
 - `RELEVANCE_THRESHOLD` - Minimum similarity score (0.5)
 
-## Cost Estimates
+## Cost Estimates (Phase 2 - Actual Tracking)
 
-Per 1000 queries (5 chunks, 200-word answers):
-- Embeddings: ~$0.02 (negligible, cached after first)
-- Claude: ~$1.50
-- **Total: ~$1.52/1000 queries**
+Per Query (5 chunks, 200-word answer):
+- Embeddings: $0.000002 (cached after first query)
+- Cohere Reranking: Free tier (or ~$0.002)
+- Claude Generation: $0.005-0.010
+- **Total: ~$0.007-0.012 per query**
+
+Per 1000 queries: **$7-12** (with caching)
+
+One-Time Ingestion (per PDF):
+- Embeddings: Cached after first run
+- Concept Extraction: ~$0.50 for 57 chunks (Unit_3 example)
+- **Total: ~$0.50 per document**
 
 ## Contact Context
 
@@ -290,3 +313,84 @@ This is a personal project for the user's 4 years of undergrad notes. Single-use
 ---
 
 **When resuming work**: Start by checking what phase user wants to work on. If continuing Phase 2, begin with concept extraction in `rag_pipeline.py`.
+
+---
+
+## Phase 2 Implementation Details
+
+### Task 1: Accurate Cost Tracking ✅
+
+**Files Modified:**
+- `backend/app/services/embeddings.py` - Returns `(embedding, tokens)` tuples
+- `backend/app/services/rag_pipeline.py` - Tracks actual Claude token usage
+- `backend/app/models/schemas.py` - Renamed `cost_estimate_cents` → `cost_cents`
+
+**Implementation:**
+- OpenAI API returns `usage.total_tokens` for embeddings
+- Claude API returns `usage.input_tokens` and `usage.output_tokens`
+- Calculate cost: `(embedding_tokens × $0.02 + input_tokens × $3 + output_tokens × $15) / 1M`
+
+**Verified Result:** $0.007866 per query (actual, not estimated)
+
+### Task 2: Cohere Reranking ✅
+
+**Files Modified:**
+- `backend/pyproject.toml` - Added `cohere>=5.11.0`
+- `backend/app/services/rag_pipeline.py` - Implemented `_rerank_chunks()` with Cohere
+- `backend/app/core/config.py` + `.env.example` - Added `COHERE_API_KEY`
+- `docker-compose.yml` - Pass env var to container
+
+**Implementation:**
+- Uses `rerank-v3.5` multilingual model
+- Graceful fallback to score-based filtering on API failure
+- Updates chunk relevance scores with Cohere's semantic ranking
+
+### Task 3: Concept Extraction ✅
+
+**New File:**
+- `backend/app/services/concept_extractor.py` - Claude-powered extraction
+
+**Files Modified:**
+- `backend/app/api/routes/ingest.py` - Integration into ingestion pipeline
+- `backend/app/services/neo4j_client.py` - Added `get_concepts_for_chunks()`
+- `backend/app/services/rag_pipeline.py` - Fixed `_build_concept_graph()`
+- `backend/app/api/dependencies.py` + `backend/app/main.py` - DI setup
+
+**Implementation:**
+- Extracts 6 concept types: algorithm, topic, theory, technique, term, person
+- JSON-structured prompts with confidence scores
+- Chunk-level co-occurrence relationships (not file-level)
+- Neo4j schema: `(Concept)-[:MENTIONED_IN]->(Chunk)` and `(Concept)-[:RELATES_TO {weight}]-(Concept)`
+
+**Performance Metrics (Unit_3_532.pdf):**
+- 372 concepts extracted from 57 chunks (~6.5 per chunk)
+- Processing time: ~8 minutes
+- Cost: ~$0.50 (one-time per document)
+- Relationship weights: 4-10 (strong co-occurrence)
+- Connection distribution: 19-132 per concept (meaningful clustering)
+
+### Known Issues & Resolutions
+
+1. **Missing COHERE_API_KEY in Docker** ✅ Fixed
+   - Added to `docker-compose.yml` environment variables
+
+2. **Over-connected graph (all weights=1)** ✅ Fixed
+   - Changed from file-level to chunk-level relationships
+
+3. **Variable reference bug in logging** ✅ Fixed
+   - Removed `file_concepts` reference in `ingest.py:106`
+
+### Testing Checklist ✅
+
+- [x] Health endpoint returns all services healthy
+- [x] PDF ingestion completes successfully (370+ concepts)
+- [x] Query pipeline returns accurate costs
+- [x] Cohere reranking updates relevance scores
+- [x] Neo4j graph shows varied relationship weights
+- [x] Graph endpoint returns concept neighborhoods
+- [x] Redis caching reduces embedding costs to $0
+
+---
+
+**Phase 2 Status:** Complete ✅ (2025-11-29)
+**Ready for Phase 3:** Frontend Development

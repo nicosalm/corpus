@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     # API Keys
     anthropic_api_key: str = Field(..., description="Anthropic API key for Claude")
     openai_api_key: str = Field(..., description="OpenAI API key for embeddings")
+    cohere_api_key: str = Field(..., description="Cohere API key for reranking")
     fish_audio_api_key: str = Field(..., description="Fish Audio API key for TTS")
 
     # Neo4j

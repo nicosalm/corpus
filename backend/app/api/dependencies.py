@@ -2,6 +2,7 @@
 
 from typing import AsyncGenerator
 
+from app.services.concept_extractor import ConceptExtractor
 from app.services.embeddings import EmbeddingService
 from app.services.neo4j_client import Neo4jClient
 from app.services.rag_pipeline import RAGPipeline
@@ -10,18 +11,21 @@ from app.services.rag_pipeline import RAGPipeline
 _embedding_service: EmbeddingService | None = None
 _neo4j_client: Neo4jClient | None = None
 _rag_pipeline: RAGPipeline | None = None
+_concept_extractor: ConceptExtractor | None = None
 
 
 def initialize_services(
     embedding_service: EmbeddingService,
     neo4j_client: Neo4jClient,
     rag_pipeline: RAGPipeline,
+    concept_extractor: ConceptExtractor,
 ) -> None:
     """Initialize global service instances."""
-    global _embedding_service, _neo4j_client, _rag_pipeline
+    global _embedding_service, _neo4j_client, _rag_pipeline, _concept_extractor
     _embedding_service = embedding_service
     _neo4j_client = neo4j_client
     _rag_pipeline = rag_pipeline
+    _concept_extractor = concept_extractor
 
 
 async def get_embedding_service() -> EmbeddingService:
@@ -43,3 +47,10 @@ async def get_rag_pipeline() -> RAGPipeline:
     if _rag_pipeline is None:
         raise RuntimeError("RAGPipeline not initialized")
     return _rag_pipeline
+
+
+async def get_concept_extractor() -> ConceptExtractor:
+    """Get concept extractor instance."""
+    if _concept_extractor is None:
+        raise RuntimeError("ConceptExtractor not initialized")
+    return _concept_extractor

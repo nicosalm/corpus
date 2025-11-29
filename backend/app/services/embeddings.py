@@ -47,7 +47,7 @@ class EmbeddingService:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
     )
-    async def embed_text(self, text: str) -> list[float]:
+    async def embed_text(self, text: str) -> tuple[list[float], int]:
         """
         Generate embedding for text with caching and retry.
 
@@ -55,7 +55,7 @@ class EmbeddingService:
             text: Text to embed
 
         Returns:
-            Embedding vector
+            Tuple of (embedding vector, token count)
 
         Raises:
             EmbeddingError: If embedding generation fails
@@ -65,7 +65,8 @@ class EmbeddingService:
         cached = await self._get_cached_embedding(cache_key)
         if cached:
             logger.debug("embedding_cache_hit", cache_key=cache_key)
-            return cached
+            # Cached embeddings don't incur token costs
+            return cached, 0
 
         # Generate embedding
         try:
@@ -77,17 +78,22 @@ class EmbeddingService:
             )
 
             embedding = response.data[0].embedding
+            tokens_used = response.usage.total_tokens
 
             # Cache the result
             await self._cache_embedding(cache_key, embedding)
 
-            logger.debug("embedding_generated", dimensions=len(embedding))
-            return embedding
+            logger.debug(
+                "embedding_generated",
+                dimensions=len(embedding),
+                tokens=tokens_used,
+            )
+            return embedding, tokens_used
 
         except Exception as e:
             raise EmbeddingError(f"Failed to generate embedding: {str(e)}") from e
 
-    async def embed_chunks(self, chunks: list[TextChunk]) -> list[EmbeddedChunk]:
+    async def embed_chunks(self, chunks: list[TextChunk]) -> tuple[list[EmbeddedChunk], int]:
         """
         Generate embeddings for multiple chunks.
 
@@ -95,14 +101,16 @@ class EmbeddingService:
             chunks: List of text chunks
 
         Returns:
-            List of embedded chunks
+            Tuple of (list of embedded chunks, total tokens used)
         """
         logger.info("embedding_chunks", num_chunks=len(chunks))
 
         embedded_chunks: list[EmbeddedChunk] = []
+        total_tokens = 0
 
         for chunk in chunks:
-            embedding = await self.embed_text(chunk.text)
+            embedding, tokens = await self.embed_text(chunk.text)
+            total_tokens += tokens
             embedded_chunk = EmbeddedChunk(
                 chunk=chunk,
                 embedding=embedding,
@@ -110,10 +118,14 @@ class EmbeddingService:
             )
             embedded_chunks.append(embedded_chunk)
 
-        logger.info("chunks_embedded", count=len(embedded_chunks))
-        return embedded_chunks
+        logger.info(
+            "chunks_embedded",
+            count=len(embedded_chunks),
+            total_tokens=total_tokens,
+        )
+        return embedded_chunks, total_tokens
 
-    async def embed_query(self, query: str) -> list[float]:
+    async def embed_query(self, query: str) -> tuple[list[float], int]:
         """
         Generate embedding for a search query.
 
@@ -121,7 +133,7 @@ class EmbeddingService:
             query: Search query text
 
         Returns:
-            Query embedding vector
+            Tuple of (query embedding vector, tokens used)
         """
         return await self.embed_text(query)
 

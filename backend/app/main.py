@@ -10,6 +10,7 @@ from app.api import dependencies
 from app.api.routes import graph, health, ingest, query
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
+from app.services.concept_extractor import ConceptExtractor
 from app.services.embeddings import EmbeddingService
 from app.services.neo4j_client import Neo4jClient
 from app.services.rag_pipeline import RAGPipeline
@@ -28,6 +29,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Initialize services
     embedding_service = EmbeddingService()
     neo4j_client = Neo4jClient()
+    concept_extractor = ConceptExtractor()
     rag_pipeline = RAGPipeline(
         embedding_service=embedding_service,
         neo4j_client=neo4j_client,
@@ -43,6 +45,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             embedding_service=embedding_service,
             neo4j_client=neo4j_client,
             rag_pipeline=rag_pipeline,
+            concept_extractor=concept_extractor,
         )
 
         logger.info("application_started")

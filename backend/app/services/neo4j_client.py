@@ -218,6 +218,35 @@ class Neo4jClient:
                     "concept2": concept2,
                 })
 
+    async def get_concepts_for_chunks(self, chunk_ids: list[str]) -> list[str]:
+        """
+        Get all concepts mentioned in given chunks.
+
+        Args:
+            chunk_ids: List of chunk IDs
+
+        Returns:
+            List of concept names
+        """
+        if not self.driver:
+            raise Neo4jError("Driver not initialized")
+
+        async with self.driver.session() as session:
+            result = await session.run("""
+                MATCH (c:Concept)-[:MENTIONED_IN]->(chunk:Chunk)
+                WHERE chunk.chunk_id IN $chunk_ids
+                RETURN DISTINCT c.name AS name
+                ORDER BY c.name
+            """, {
+                "chunk_ids": chunk_ids,
+            })
+
+            concepts: list[str] = []
+            async for record in result:
+                concepts.append(record["name"])
+
+            return concepts
+
     async def get_concept_graph(self, concept_name: str, depth: int = 2) -> ConceptGraph:
         """
         Get neighborhood graph around a concept.

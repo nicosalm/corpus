@@ -63,7 +63,7 @@ class QueryResponse(BaseModel):
     chunks: list[DocumentChunk]
     graph: ConceptGraph | None = None
     processing_time_ms: float
-    cost_estimate_cents: float | None = None
+    cost_cents: float
 
 
 class HealthResponse(BaseModel):

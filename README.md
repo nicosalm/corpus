@@ -183,11 +183,12 @@ pytest tests/unit/test_pdf_processor.py
 - Docker setup with Neo4j + Redis
 - 4 API endpoints, tests passing
 
-**Phase 2: Enhanced RAG (Next)**
-- Concept extraction (currently stubbed in `rag_pipeline.py:118`)
-- Proper reranking with Cohere (using simple score filter now)
-- Actual cost tracking from API responses
-- Conversation history and context tracking
+**Phase 2: Enhanced RAG ✅** (Completed 2025-11-29)
+- ✅ Concept extraction with Claude (6 types: algorithm, topic, theory, technique, term, person)
+- ✅ Cohere rerank-v3.5 with fallback
+- ✅ Accurate cost tracking from API responses ($0.007-0.012/query)
+- ✅ Knowledge graph with chunk-level co-occurrence relationships
+- ✅ 372 concepts extracted from Unit_3_532.pdf
 
 **Phase 3: Frontend**
 - Svelte web app
@@ -199,10 +200,10 @@ pytest tests/unit/test_pdf_processor.py
 ## Known Limitations
 
 - **No OCR**: Handwritten notes won't work (digital text PDFs only)
-- **Concept extraction stubbed**: Graph endpoints return empty until implemented
-- **Simple reranking**: Using cosine similarity filtering instead of proper reranking model
 - **No rate limiting**: API endpoints are unprotected
 - **No conversation context**: Each query is independent
+- **Concept naming**: Uses full names ("Principal Component Analysis" not "PCA")
+- **Sequential ingestion**: Concept extraction is slow (~8min for 57 chunks)
 
 ## Architecture Decisions
 
@@ -214,12 +215,18 @@ Based on [Vectorize RAG Best Practices](https://vectorize.io/blog/creating-a-con
 4. **Relevance Threshold**: Discard low-scoring chunks (< 0.5)
 5. **Context-Sensitive Retrieval**: Metadata-enriched queries
 
-## Cost Estimates
+## Cost Estimates (Phase 2 - Actual Tracking)
 
-Per 1000 queries (assuming 5 chunks, 200-word answers):
+**Per Query** (5 chunks, 200-word answer):
+- Embeddings: $0.000002 (cached after first)
+- Cohere Reranking: Free tier or ~$0.002
+- Claude Generation: $0.005-0.010
+- **Total: $0.007-0.012 per query**
 
-- **Embeddings**: ~$0.02 (cached after first query)
-- **Claude**: ~$1.50
-- **Total**: ~$1.52/1000 queries
+**Per 1000 Queries:** $7-12 (with caching)
 
-Redis caching reduces embedding costs by ~95% after initial ingestion.
+**One-Time Ingestion** (per PDF):
+- Concept Extraction: ~$0.50 for 57 chunks
+- Embeddings: Cached after first run
+
+Redis caching reduces embedding costs by ~95%.
