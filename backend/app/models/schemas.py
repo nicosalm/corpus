@@ -1,22 +1,15 @@
-"""Pydantic models for API requests and responses."""
-
 from datetime import datetime
 
 from pydantic import BaseModel, Field
 
 
-# API Request/Response Models
 class QueryRequest(BaseModel):
-    """Request model for RAG query endpoint."""
-
-    question: str = Field(..., min_length=1, description="User question")
-    max_chunks: int = Field(default=5, ge=1, le=20, description="Maximum chunks to return")
-    include_graph: bool = Field(default=True, description="Include concept graph in response")
+    question: str = Field(..., min_length=1)
+    max_chunks: int = Field(default=5, ge=1, le=20)
+    include_graph: bool = True
 
 
 class ChunkMetadata(BaseModel):
-    """Metadata for a document chunk."""
-
     chunk_id: str
     course: str | None = None
     lecture: str | None = None
@@ -26,49 +19,38 @@ class ChunkMetadata(BaseModel):
 
 
 class DocumentChunk(BaseModel):
-    """Retrieved document chunk with metadata."""
-
     content: str
     metadata: ChunkMetadata
 
 
 class ConceptNode(BaseModel):
-    """Graph concept node."""
-
     name: str
-    node_type: str  # "concept", "course", "document"
+    node_type: str
     description: str | None = None
 
 
 class ConceptEdge(BaseModel):
-    """Graph edge between concepts."""
-
     source: str
     target: str
-    edge_type: str  # "RELATES_TO", "PREREQUISITE", "MENTIONED_IN", "CONTAINS"
+    edge_type: str
     weight: float | None = None
 
 
 class ConceptGraph(BaseModel):
-    """Knowledge graph structure."""
-
     nodes: list[ConceptNode]
     edges: list[ConceptEdge]
 
 
 class QueryResponse(BaseModel):
-    """Response model for RAG query endpoint."""
-
     answer: str
     chunks: list[DocumentChunk]
     graph: ConceptGraph | None = None
     processing_time_ms: float
     cost_cents: float
+    cached: bool = False
 
 
 class HealthResponse(BaseModel):
-    """Health check response."""
-
     status: str
     neo4j_connected: bool
     redis_connected: bool
@@ -76,16 +58,12 @@ class HealthResponse(BaseModel):
 
 
 class IngestRequest(BaseModel):
-    """Request to ingest PDF documents."""
-
-    file_paths: list[str] = Field(..., min_length=1, description="Paths to PDF files")
-    course_name: str | None = Field(None, description="Course name override")
-    overwrite: bool = Field(default=False, description="Overwrite existing chunks")
+    file_paths: list[str] = Field(..., min_length=1)
+    course_name: str | None = None
+    overwrite: bool = False
 
 
 class IngestResponse(BaseModel):
-    """Response from PDF ingestion."""
-
     files_processed: int
     chunks_created: int
     concepts_extracted: int

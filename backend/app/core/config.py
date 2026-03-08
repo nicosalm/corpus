@@ -1,71 +1,49 @@
-"""Application configuration using pydantic-settings."""
-
 from functools import lru_cache
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
-
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
     )
 
-    # API Keys
-    anthropic_api_key: str = Field(..., description="Anthropic API key for Claude")
-    openai_api_key: str = Field(..., description="OpenAI API key for embeddings")
-    cohere_api_key: str = Field(..., description="Cohere API key for reranking")
-    fish_audio_api_key: str = Field(..., description="Fish Audio API key for TTS")
+    # API keys
+    anthropic_api_key: str
+    openai_api_key: str
+    cohere_api_key: str
+    fish_audio_api_key: str | None = None
 
-    # Neo4j
-    neo4j_uri: str = Field(default="bolt://localhost:7687", description="Neo4j connection URI")
-    neo4j_user: str = Field(default="neo4j", description="Neo4j username")
-    neo4j_password: str = Field(..., description="Neo4j password")
-
-    # Redis
-    redis_url: str = Field(default="redis://localhost:6379", description="Redis connection URL")
+    # Infrastructure
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str
+    redis_url: str = "redis://localhost:6379"
 
     # Application
-    environment: str = Field(default="development", description="Environment name")
-    log_level: str = Field(default="INFO", description="Logging level")
+    environment: str = "development"
+    log_level: str = "INFO"
 
-    # Embedding Configuration
-    embedding_model: str = Field(
-        default="text-embedding-3-small",
-        description="OpenAI embedding model to use",
-    )
-    embedding_dimensions: int = Field(
-        default=1536,
-        description="Embedding vector dimensions",
-    )
+    # Models
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = 1536
+    claude_model: str = "claude-sonnet-4-5-20250929"
 
-    # Claude Configuration
-    claude_model: str = Field(
-        default="claude-sonnet-4-5-20250929",
-        description="Anthropic Claude model to use (sonnet-4-5, opus-4-5, or haiku-4-5)",
-    )
+    # Chunking
+    chunk_size: int = 800
+    chunk_overlap: int = 100
 
-    # Chunking Configuration
-    chunk_size: int = Field(default=800, description="Target chunk size in tokens")
-    chunk_overlap: int = Field(default=100, description="Overlap between chunks in tokens")
+    # RAG
+    max_chunks_retrieved: int = 20
+    rerank_top_k: int = 5
+    relevance_threshold: float = 0.5
 
-    # RAG Configuration
-    max_chunks_retrieved: int = Field(
-        default=20,
-        description="Maximum chunks to retrieve from vector search",
-    )
-    rerank_top_k: int = Field(default=5, description="Top K chunks after reranking")
-    relevance_threshold: float = Field(
-        default=0.5,
-        description="Minimum relevance score for chunks",
-    )
+    # Caching
+    response_cache_ttl: int = 60 * 60 * 24  # 1 day
 
 
 @lru_cache
 def get_settings() -> Settings:
-    """Get cached settings instance."""
     return Settings()

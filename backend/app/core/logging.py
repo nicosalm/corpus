@@ -1,5 +1,3 @@
-"""Structured logging configuration using structlog."""
-
 import logging
 import sys
 
@@ -9,10 +7,8 @@ from app.core.config import get_settings
 
 
 def setup_logging() -> None:
-    """Configure structured logging for the application."""
     settings = get_settings()
 
-    # Configure structlog
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -24,7 +20,8 @@ def setup_logging() -> None:
             structlog.processors.StackInfoRenderer(),
             structlog.processors.format_exc_info,
             structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer() if settings.environment == "production"
+            structlog.processors.JSONRenderer()
+            if settings.environment == "production"
             else structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.stdlib.BoundLogger,
@@ -33,7 +30,6 @@ def setup_logging() -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Configure standard logging
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
@@ -42,5 +38,4 @@ def setup_logging() -> None:
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:
-    """Get a structured logger instance."""
     return structlog.get_logger(name)

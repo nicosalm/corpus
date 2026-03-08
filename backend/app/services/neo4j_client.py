@@ -1,6 +1,4 @@
-"""Neo4j client for vector search and graph operations."""
-
-from neo4j import AsyncGraphDatabase, AsyncDriver
+from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from app.core.config import get_settings
 from app.core.exceptions import Neo4jError
@@ -10,16 +8,23 @@ from app.models.schemas import ChunkMetadata, ConceptEdge, ConceptGraph, Concept
 
 logger = get_logger(__name__)
 
+# Pre-built Cypher queries keyed by depth to avoid f-string interpolation of user input.
+_CONCEPT_GRAPH_QUERIES = {
+    depth: f"""
+        MATCH path = (c:Concept {{name: $concept_name}})-[:RELATES_TO*1..{depth}]-(related:Concept)
+        RETURN c, related, relationships(path) as rels
+        LIMIT 50
+    """
+    for depth in range(1, 5)
+}
+
 
 class Neo4jClient:
-    """Handles all Neo4j database operations."""
-
     def __init__(self) -> None:
         self.settings = get_settings()
         self.driver: AsyncDriver | None = None
 
     async def connect(self) -> None:
-        """Initialize Neo4j driver."""
         try:
             self.driver = AsyncGraphDatabase.driver(
                 self.settings.neo4j_uri,
@@ -27,26 +32,20 @@ class Neo4jClient:
             )
             await self.driver.verify_connectivity()
             logger.info("neo4j_connected")
-
-            # Initialize schema and indexes
             await self._init_schema()
-
         except Exception as e:
-            raise Neo4jError(f"Failed to connect to Neo4j: {str(e)}") from e
+            raise Neo4jError(f"Failed to connect to Neo4j: {e}") from e
 
     async def close(self) -> None:
-        """Close Neo4j driver."""
         if self.driver:
             await self.driver.close()
             logger.info("neo4j_closed")
 
     async def _init_schema(self) -> None:
-        """Create vector index and constraints."""
         if not self.driver:
             raise Neo4jError("Driver not initialized")
 
         async with self.driver.session() as session:
-            # Create vector index for chunks
             await session.run("""
                 CREATE VECTOR INDEX chunk_embeddings IF NOT EXISTS
                 FOR (c:Chunk)
@@ -57,7 +56,6 @@ class Neo4jClient:
                 }}
             """, dimensions=self.settings.embedding_dimensions)
 
-            # Create uniqueness constraints
             await session.run("""
                 CREATE CONSTRAINT chunk_id_unique IF NOT EXISTS
                 FOR (c:Chunk) REQUIRE c.chunk_id IS UNIQUE
@@ -71,37 +69,37 @@ class Neo4jClient:
             logger.info("neo4j_schema_initialized")
 
     async def store_chunks(self, embedded_chunks: list[EmbeddedChunk]) -> None:
-        """
-        Store embedded chunks in Neo4j.
-
-        Args:
-            embedded_chunks: List of chunks with embeddings
-        """
         if not self.driver:
             raise Neo4jError("Driver not initialized")
+        if not embedded_chunks:
+            return
+
+        rows = [
+            {
+                "chunk_id": ec.chunk.chunk_id,
+                "text": ec.chunk.text,
+                "embedding": ec.embedding,
+                "source_file": ec.chunk.source_file,
+                "page_num": ec.chunk.page_num,
+                "course": ec.chunk.metadata.get("course"),
+                "lecture": ec.chunk.metadata.get("lecture"),
+                "embedding_model": ec.embedding_model,
+            }
+            for ec in embedded_chunks
+        ]
 
         async with self.driver.session() as session:
-            for emb_chunk in embedded_chunks:
-                chunk = emb_chunk.chunk
-                await session.run("""
-                    MERGE (c:Chunk {chunk_id: $chunk_id})
-                    SET c.text = $text,
-                        c.embedding = $embedding,
-                        c.source_file = $source_file,
-                        c.page_num = $page_num,
-                        c.course = $course,
-                        c.lecture = $lecture,
-                        c.embedding_model = $embedding_model
-                """, {
-                    "chunk_id": chunk.chunk_id,
-                    "text": chunk.text,
-                    "embedding": emb_chunk.embedding,
-                    "source_file": chunk.source_file,
-                    "page_num": chunk.page_num,
-                    "course": chunk.metadata.get("course"),
-                    "lecture": chunk.metadata.get("lecture"),
-                    "embedding_model": emb_chunk.embedding_model,
-                })
+            await session.run("""
+                UNWIND $rows AS row
+                MERGE (c:Chunk {chunk_id: row.chunk_id})
+                SET c.text = row.text,
+                    c.embedding = row.embedding,
+                    c.source_file = row.source_file,
+                    c.page_num = row.page_num,
+                    c.course = row.course,
+                    c.lecture = row.lecture,
+                    c.embedding_model = row.embedding_model
+            """, {"rows": rows})
 
         logger.info("chunks_stored", count=len(embedded_chunks))
 
@@ -110,16 +108,6 @@ class Neo4jClient:
         query_embedding: list[float],
         limit: int = 20,
     ) -> list[DocumentChunk]:
-        """
-        Perform vector similarity search.
-
-        Args:
-            query_embedding: Query embedding vector
-            limit: Maximum number of results
-
-        Returns:
-            List of similar document chunks with scores
-        """
         if not self.driver:
             raise Neo4jError("Driver not initialized")
 
@@ -141,18 +129,16 @@ class Neo4jClient:
 
             chunks: list[DocumentChunk] = []
             async for record in result:
-                metadata = ChunkMetadata(
-                    chunk_id=record["chunk_id"],
-                    course=record["course"],
-                    lecture=record["lecture"],
-                    page_num=record["page_num"],
-                    relevance_score=record["score"],
-                )
-                chunk = DocumentChunk(
+                chunks.append(DocumentChunk(
                     content=record["text"],
-                    metadata=metadata,
-                )
-                chunks.append(chunk)
+                    metadata=ChunkMetadata(
+                        chunk_id=record["chunk_id"],
+                        course=record["course"],
+                        lecture=record["lecture"],
+                        page_num=record["page_num"],
+                        relevance_score=record["score"],
+                    ),
+                ))
 
             logger.info("vector_search_complete", results=len(chunks))
             return chunks
@@ -162,72 +148,51 @@ class Neo4jClient:
         concepts: list[ExtractedConcept],
         chunk_id: str,
     ) -> None:
-        """
-        Store extracted concepts and link to chunk.
-
-        Args:
-            concepts: List of extracted concepts
-            chunk_id: Source chunk ID
-        """
         if not self.driver:
             raise Neo4jError("Driver not initialized")
+        if not concepts:
+            return
+
+        rows = [{"name": c.name, "concept_type": c.concept_type} for c in concepts]
 
         async with self.driver.session() as session:
-            for concept in concepts:
-                # Create concept node
-                await session.run("""
-                    MERGE (c:Concept {name: $name})
-                    SET c.concept_type = $concept_type
-                """, {
-                    "name": concept.name,
-                    "concept_type": concept.concept_type,
-                })
+            await session.run("""
+                UNWIND $rows AS row
+                MERGE (c:Concept {name: row.name})
+                SET c.concept_type = row.concept_type
+            """, {"rows": rows})
 
-                # Link concept to chunk
-                await session.run("""
-                    MATCH (chunk:Chunk {chunk_id: $chunk_id})
-                    MATCH (concept:Concept {name: $concept_name})
-                    MERGE (concept)-[:MENTIONED_IN]->(chunk)
-                """, {
-                    "chunk_id": chunk_id,
-                    "concept_name": concept.name,
-                })
+            await session.run("""
+                MATCH (chunk:Chunk {chunk_id: $chunk_id})
+                UNWIND $names AS name
+                MATCH (concept:Concept {name: name})
+                MERGE (concept)-[:MENTIONED_IN]->(chunk)
+            """, {
+                "chunk_id": chunk_id,
+                "names": [c.name for c in concepts],
+            })
 
         logger.info("concepts_stored", count=len(concepts), chunk_id=chunk_id)
 
     async def create_concept_relations(self, concept_pairs: list[tuple[str, str]]) -> None:
-        """
-        Create RELATES_TO edges between concepts that co-occur.
-
-        Args:
-            concept_pairs: List of (concept1, concept2) tuples
-        """
         if not self.driver:
             raise Neo4jError("Driver not initialized")
+        if not concept_pairs:
+            return
+
+        rows = [{"c1": c1, "c2": c2} for c1, c2 in concept_pairs]
 
         async with self.driver.session() as session:
-            for concept1, concept2 in concept_pairs:
-                await session.run("""
-                    MATCH (c1:Concept {name: $concept1})
-                    MATCH (c2:Concept {name: $concept2})
-                    MERGE (c1)-[r:RELATES_TO]-(c2)
-                    ON CREATE SET r.weight = 1
-                    ON MATCH SET r.weight = r.weight + 1
-                """, {
-                    "concept1": concept1,
-                    "concept2": concept2,
-                })
+            await session.run("""
+                UNWIND $rows AS row
+                MATCH (c1:Concept {name: row.c1})
+                MATCH (c2:Concept {name: row.c2})
+                MERGE (c1)-[r:RELATES_TO]-(c2)
+                ON CREATE SET r.weight = 1
+                ON MATCH SET r.weight = r.weight + 1
+            """, {"rows": rows})
 
     async def get_concepts_for_chunks(self, chunk_ids: list[str]) -> list[str]:
-        """
-        Get all concepts mentioned in given chunks.
-
-        Args:
-            chunk_ids: List of chunk IDs
-
-        Returns:
-            List of concept names
-        """
         if not self.driver:
             raise Neo4jError("Driver not initialized")
 
@@ -237,44 +202,26 @@ class Neo4jClient:
                 WHERE chunk.chunk_id IN $chunk_ids
                 RETURN DISTINCT c.name AS name
                 ORDER BY c.name
-            """, {
-                "chunk_ids": chunk_ids,
-            })
+            """, {"chunk_ids": chunk_ids})
 
-            concepts: list[str] = []
-            async for record in result:
-                concepts.append(record["name"])
-
-            return concepts
+            return [record["name"] async for record in result]
 
     async def get_concept_graph(self, concept_name: str, depth: int = 2) -> ConceptGraph:
-        """
-        Get neighborhood graph around a concept.
-
-        Args:
-            concept_name: Central concept
-            depth: How many hops to traverse
-
-        Returns:
-            Knowledge graph structure
-        """
         if not self.driver:
             raise Neo4jError("Driver not initialized")
+        if depth not in _CONCEPT_GRAPH_QUERIES:
+            raise ValueError(f"depth must be 1-4, got {depth}")
 
         async with self.driver.session() as session:
-            result = await session.run(f"""
-                MATCH path = (c:Concept {{name: $concept_name}})-[:RELATES_TO*1..{depth}]-(related:Concept)
-                RETURN c, related, relationships(path) as rels
-                LIMIT 50
-            """, {
-                "concept_name": concept_name,
-            })
+            result = await session.run(
+                _CONCEPT_GRAPH_QUERIES[depth],
+                {"concept_name": concept_name},
+            )
 
             nodes_dict: dict[str, ConceptNode] = {}
             edges: list[ConceptEdge] = []
 
             async for record in result:
-                # Add nodes
                 for node in [record["c"], record["related"]]:
                     if node["name"] not in nodes_dict:
                         nodes_dict[node["name"]] = ConceptNode(
@@ -282,26 +229,19 @@ class Neo4jClient:
                             node_type="concept",
                         )
 
-                # Add edges
                 for rel in record["rels"]:
-                    edge = ConceptEdge(
+                    edges.append(ConceptEdge(
                         source=rel.start_node["name"],
                         target=rel.end_node["name"],
                         edge_type="RELATES_TO",
                         weight=rel.get("weight", 1.0),
-                    )
-                    edges.append(edge)
+                    ))
 
-            return ConceptGraph(
-                nodes=list(nodes_dict.values()),
-                edges=edges,
-            )
+            return ConceptGraph(nodes=list(nodes_dict.values()), edges=edges)
 
     async def health_check(self) -> bool:
-        """Check if Neo4j is connected and responsive."""
         if not self.driver:
             return False
-
         try:
             await self.driver.verify_connectivity()
             return True

@@ -1,42 +1,19 @@
-"""Concept extraction service using Claude."""
-
+import asyncio
 import json
+
 from anthropic import AsyncAnthropic
 
 from app.core.config import get_settings
-from app.core.exceptions import RAGPipelineError
 from app.core.logging import get_logger
 from app.models.domain import ExtractedConcept, TextChunk
 
 logger = get_logger(__name__)
 
+_VALID_CONCEPT_TYPES = {"algorithm", "topic", "theory", "technique", "term", "person"}
 
-class ConceptExtractor:
-    """Extract semantic concepts from text chunks using Claude."""
-
-    def __init__(self) -> None:
-        self.settings = get_settings()
-        self.client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
-
-    async def extract_concepts(self, chunk: TextChunk) -> list[ExtractedConcept]:
-        """
-        Extract key concepts from a text chunk.
-
-        Identifies:
-        - Algorithms (e.g., K-Means, Dijkstra's Algorithm)
-        - Topics (e.g., Machine Learning, Graph Theory)
-        - Theories (e.g., Big-O Notation, Bayes' Theorem)
-        - Techniques (e.g., Dynamic Programming, Backtracking)
-        - Terms (e.g., Eigenvalue, Gradient Descent)
-        - People (e.g., Turing, Dijkstra)
-
-        Args:
-            chunk: Text chunk to analyze
-
-        Returns:
-            List of extracted concepts with metadata
-        """
-        prompt = f"""You are a concept extraction AI for academic notes. Extract key concepts from the following text.
+_EXTRACTION_PROMPT = """\
+You are a concept extraction AI for academic notes. \
+Extract key concepts from the following text.
 
 For each concept, provide:
 1. **name**: The concept name (2-5 words, title case)
@@ -54,7 +31,7 @@ RULES:
 - Skip generic words like "data", "example", "chapter"
 
 TEXT TO ANALYZE:
-{chunk.text}
+{text}
 
 Respond with a JSON array of concepts:
 ```json
@@ -70,59 +47,52 @@ Respond with a JSON array of concepts:
 
 JSON array of concepts:"""
 
+
+class ConceptExtractor:
+    def __init__(self) -> None:
+        self.settings = get_settings()
+        self.client = AsyncAnthropic(api_key=self.settings.anthropic_api_key)
+
+    async def extract_concepts(self, chunk: TextChunk) -> list[ExtractedConcept]:
         try:
             response = await self.client.messages.create(
                 model=self.settings.claude_model,
                 max_tokens=2048,
-                messages=[{"role": "user", "content": prompt}],
+                messages=[{"role": "user", "content": _EXTRACTION_PROMPT.format(text=chunk.text)}],
             )
 
-            # Extract JSON from response
             response_text = response.content[0].text.strip()
 
-            # Handle markdown code blocks
+            # Strip code fences if present
             if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
                 response_text = response_text.split("```")[1].split("```")[0].strip()
 
-            # Parse JSON
             concepts_data = json.loads(response_text)
-
-            # Validate and convert to ExtractedConcept objects
             concepts: list[ExtractedConcept] = []
-            valid_types = {"algorithm", "topic", "theory", "technique", "term", "person"}
 
-            for concept_dict in concepts_data:
-                # Validate concept_type
-                if concept_dict.get("concept_type") not in valid_types:
+            for item in concepts_data:
+                if item.get("concept_type") not in _VALID_CONCEPT_TYPES:
                     logger.warning(
                         "invalid_concept_type",
-                        type=concept_dict.get("concept_type"),
-                        name=concept_dict.get("name"),
+                        type=item.get("concept_type"),
+                        name=item.get("name"),
                     )
                     continue
 
-                # Validate confidence range
-                confidence = concept_dict.get("confidence", 0.5)
+                confidence = item.get("confidence", 0.5)
                 if not (0.0 <= confidence <= 1.0):
                     confidence = 0.5
 
-                concepts.append(
-                    ExtractedConcept(
-                        name=concept_dict["name"],
-                        concept_type=concept_dict["concept_type"],
-                        context=concept_dict.get("context", ""),
-                        confidence=confidence,
-                    )
-                )
+                concepts.append(ExtractedConcept(
+                    name=item["name"],
+                    concept_type=item["concept_type"],
+                    context=item.get("context", ""),
+                    confidence=confidence,
+                ))
 
-            logger.info(
-                "concepts_extracted",
-                chunk_id=chunk.chunk_id,
-                num_concepts=len(concepts),
-            )
-
+            logger.info("concepts_extracted", chunk_id=chunk.chunk_id, num_concepts=len(concepts))
             return concepts
 
         except json.JSONDecodeError as e:
@@ -135,38 +105,25 @@ JSON array of concepts:"""
             return []
 
         except Exception as e:
-            logger.error(
-                "concept_extraction_failed",
-                chunk_id=chunk.chunk_id,
-                error=str(e),
-            )
+            logger.error("concept_extraction_failed", chunk_id=chunk.chunk_id, error=str(e))
             return []
 
     async def extract_batch(
         self,
         chunks: list[TextChunk],
-        batch_size: int = 5,
+        max_concurrency: int = 5,
     ) -> dict[str, list[ExtractedConcept]]:
-        """
-        Extract concepts from multiple chunks in batches.
+        semaphore = asyncio.Semaphore(max_concurrency)
 
-        Args:
-            chunks: List of text chunks
-            batch_size: Number of chunks to process at once (not implemented yet)
+        async def _extract(chunk: TextChunk) -> tuple[str, list[ExtractedConcept]]:
+            async with semaphore:
+                return chunk.chunk_id, await self.extract_concepts(chunk)
 
-        Returns:
-            Dict mapping chunk_id to list of concepts
-        """
-        results: dict[str, list[ExtractedConcept]] = {}
-
-        for chunk in chunks:
-            concepts = await self.extract_concepts(chunk)
-            results[chunk.chunk_id] = concepts
+        results_list = await asyncio.gather(*[_extract(c) for c in chunks])
 
         logger.info(
             "batch_extraction_complete",
             total_chunks=len(chunks),
-            total_concepts=sum(len(concepts) for concepts in results.values()),
+            total_concepts=sum(len(concepts) for _, concepts in results_list),
         )
-
-        return results
+        return dict(results_list)
