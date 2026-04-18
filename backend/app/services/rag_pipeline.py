@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import time
 
 from anthropic import AsyncAnthropic
@@ -8,7 +9,7 @@ from cohere import AsyncClient as CohereClient
 from app.core.config import get_settings
 from app.core.exceptions import RAGPipelineError
 from app.core.logging import get_logger
-from app.models.schemas import ConceptGraph, DocumentChunk, QueryResponse
+from app.models.schemas import Citation, ConceptGraph, DocumentChunk, QueryResponse
 from app.services.embeddings import EmbeddingService
 from app.services.neo4j_client import Neo4jClient
 
@@ -19,9 +20,14 @@ _SYSTEM_PROMPT = """You are an AI assistant helping a student understand their c
 IMPORTANT RULES:
 - Only use information explicitly stated in the context
 - If the context doesn't contain enough information, say so clearly
-- Cite which source(s) you're using (e.g., "According to Source 1...")
 - Do not add information from your general knowledge
 - Be concise but complete
+
+CITATIONS:
+- You MUST call the answer_with_citations tool to respond
+- For each claim in your answer, include a citation with the chunk_id of the source
+- Each citation's quote must be a verbatim span copied from that chunk
+- Use the exact chunk_id strings shown in the context headers
 
 FORMATTING:
 - Use markdown for structure: **bold**, *italics*, lists, headings, etc.
@@ -33,9 +39,53 @@ _USER_PROMPT = """Answer the following question using ONLY the information provi
 Context from notes:
 {context}
 
-Question: {question}
+Question: {question}"""
 
-Answer:"""
+_ANSWER_TOOL = {
+    "name": "answer_with_citations",
+    "description": (
+        "Produce an answer grounded in the provided context. For every claim, "
+        "include a citation with the chunk_id of the source chunk and a verbatim "
+        "quote from that chunk."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "answer": {
+                "type": "string",
+                "description": (
+                    "The answer to the question, in markdown. Reference sources "
+                    "inline by their chunk_id in parentheses where relevant."
+                ),
+            },
+            "citations": {
+                "type": "array",
+                "description": "Citations supporting the answer.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "chunk_id": {
+                            "type": "string",
+                            "description": (
+                                "The chunk_id of the supporting chunk. Must be one "
+                                "of the chunk_ids shown in the context headers."
+                            ),
+                        },
+                        "quote": {
+                            "type": "string",
+                            "description": (
+                                "A verbatim span copied from the cited chunk that "
+                                "supports the claim."
+                            ),
+                        },
+                    },
+                    "required": ["chunk_id", "quote"],
+                },
+            },
+        },
+        "required": ["answer", "citations"],
+    },
+}
 
 
 class RAGPipeline:
@@ -81,9 +131,10 @@ class RAGPipeline:
             relevant_chunks = await self._rerank_chunks(
                 question, retrieved_chunks, top_k=max_chunks,
             )
-            answer, input_tokens, output_tokens = await self._generate_answer(
+            answer, raw_citations, input_tokens, output_tokens = await self._generate_answer(
                 question, relevant_chunks,
             )
+            citations = self._validate_citations(raw_citations, relevant_chunks)
 
             graph: ConceptGraph | None = None
             if include_graph and relevant_chunks:
@@ -95,12 +146,15 @@ class RAGPipeline:
             logger.info(
                 "rag_query_complete",
                 chunks_used=len(relevant_chunks),
+                citations_kept=len(citations),
+                citations_dropped=len(raw_citations) - len(citations),
                 processing_time_ms=processing_time_ms,
                 cost_cents=cost_cents,
             )
 
             response = QueryResponse(
                 answer=answer,
+                citations=citations,
                 chunks=relevant_chunks,
                 graph=graph,
                 processing_time_ms=processing_time_ms,
@@ -157,10 +211,11 @@ class RAGPipeline:
         self,
         question: str,
         chunks: list[DocumentChunk],
-    ) -> tuple[str, int, int]:
+    ) -> tuple[str, list[Citation], int, int]:
         if not chunks:
             return (
                 "I couldn't find any relevant information in your notes to answer this question.",
+                [],
                 0,
                 0,
             )
@@ -172,7 +227,8 @@ class RAGPipeline:
                 source += f" - {chunk.metadata.lecture}"
             if chunk.metadata.page_num:
                 source += f" (Page {chunk.metadata.page_num})"
-            context_parts.append(f"[Source {i}: {source}]\n{chunk.content}\n")
+            header = f"[Source {i} | chunk_id={chunk.metadata.chunk_id} | {source}]"
+            context_parts.append(f"{header}\n{chunk.content}\n")
 
         user_prompt = _USER_PROMPT.format(
             context="\n---\n".join(context_parts),
@@ -188,15 +244,83 @@ class RAGPipeline:
                     "text": _SYSTEM_PROMPT,
                     "cache_control": {"type": "ephemeral"},
                 }],
+                tools=[_ANSWER_TOOL],
+                tool_choice={"type": "tool", "name": "answer_with_citations"},
                 messages=[{"role": "user", "content": user_prompt}],
             )
+            answer, citations = self._parse_tool_response(response)
             return (
-                response.content[0].text,
+                answer,
+                citations,
                 response.usage.input_tokens,
                 response.usage.output_tokens,
             )
+        except RAGPipelineError:
+            raise
         except Exception as e:
             raise RAGPipelineError(f"Failed to generate answer: {e}") from e
+
+    @staticmethod
+    def _parse_tool_response(response) -> tuple[str, list[Citation]]:
+        """Extract the answer and raw (unvalidated) citations from a tool-use response."""
+        for block in response.content:
+            if getattr(block, "type", None) == "tool_use" and block.name == "answer_with_citations":
+                payload = block.input or {}
+                answer = payload.get("answer", "").strip()
+                raw_citations: list[Citation] = []
+                for item in payload.get("citations") or []:
+                    try:
+                        raw_citations.append(Citation.model_validate(item))
+                    except Exception as e:
+                        logger.warning("citation_parse_failed", item=item, error=str(e))
+                return answer, raw_citations
+
+        raise RAGPipelineError("Claude did not call answer_with_citations tool")
+
+    @staticmethod
+    def _validate_citations(
+        citations: list[Citation],
+        retrieved_chunks: list[DocumentChunk],
+    ) -> list[Citation]:
+        """Drop citations whose chunk_id was not retrieved, or whose quote is not in that chunk.
+
+        Two-layer hallucination guard:
+        1. chunk_id must be in the retrieved set (Claude cannot invent ids)
+        2. quote must appear in the cited chunk's text (case + whitespace normalized)
+        """
+        chunks_by_id = {c.metadata.chunk_id: c for c in retrieved_chunks}
+        kept: list[Citation] = []
+        for citation in citations:
+            chunk = chunks_by_id.get(citation.chunk_id)
+            if chunk is None:
+                logger.warning(
+                    "citation_hallucinated_chunk_id",
+                    cited_chunk_id=citation.chunk_id,
+                    quote_preview=citation.quote[:80],
+                )
+                continue
+            if not RAGPipeline._quote_in_chunk(citation.quote, chunk.content):
+                logger.warning(
+                    "citation_quote_not_in_chunk",
+                    cited_chunk_id=citation.chunk_id,
+                    quote_preview=citation.quote[:80],
+                )
+                continue
+            kept.append(citation)
+        return kept
+
+    @staticmethod
+    def _quote_in_chunk(quote: str, chunk_text: str) -> bool:
+        """Case-insensitive, whitespace-normalized substring check.
+
+        LLMs sometimes tweak whitespace or capitalization when quoting.
+        We normalize both sides before comparison to reduce false negatives
+        while still catching outright fabrications.
+        """
+        def normalize(s: str) -> str:
+            return re.sub(r"\s+", " ", s).strip().lower()
+
+        return normalize(quote) in normalize(chunk_text)
 
     async def _build_concept_graph(
         self,

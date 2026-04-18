@@ -41,8 +41,14 @@ class ConceptGraph(BaseModel):
     edges: list[ConceptEdge]
 
 
+class Citation(BaseModel):
+    chunk_id: str
+    quote: str = Field(..., min_length=1)
+
+
 class QueryResponse(BaseModel):
     answer: str
+    citations: list[Citation] = Field(default_factory=list)
     chunks: list[DocumentChunk]
     graph: ConceptGraph | None = None
     processing_time_ms: float
