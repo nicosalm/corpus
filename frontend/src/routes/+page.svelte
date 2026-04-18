@@ -4,6 +4,7 @@
 	import QueryInput from '$lib/components/QueryInput.svelte';
 	import QueryMeta from '$lib/components/QueryMeta.svelte';
 	import Answer from '$lib/components/Answer.svelte';
+	import Citations from '$lib/components/Citations.svelte';
 	import SourceChunks from '$lib/components/SourceChunks.svelte';
 	import ConceptGraph from '$lib/components/ConceptGraph.svelte';
 	import QueryHistory from '$lib/components/QueryHistory.svelte';
@@ -37,6 +38,7 @@
 		error = '';
 		response = {
 			answer: entry.answer,
+			citations: entry.citations ?? [],
 			chunks: entry.chunks ?? [],
 			graph: entry.graph ?? null,
 			processing_time_ms: entry.processingTimeMs,
@@ -66,6 +68,10 @@
 			<p class="query-echo">{lastQuestion}</p>
 
 			<Answer answer={response.answer} />
+
+			{#if response.citations && response.citations.length > 0}
+				<Citations citations={response.citations} chunks={response.chunks} />
+			{/if}
 
 			<QueryMeta
 				processingTimeMs={response.processing_time_ms}
