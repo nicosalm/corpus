@@ -1,76 +1,40 @@
-# Corpus
+Corpus
+======
 
-RAG system that turns your notes (PDFs) into a queryable knowledge graph.
+> [!NOTE]
+> Corpus organizes your notes as a knowledge graph. On top of vector
+> search and reranking, chunks are linked through the concepts they
+> share, so related material surfaces together and answers stay anchored
+> to the sources that back them.
 
-## Quick Start
+Corpus is a retrieval-augmented question-answering system for PDF notes.
+It ingests documents into a Neo4j knowledge graph, embeds chunks with
+OpenAI, reranks candidates with Cohere, and generates grounded answers
+with the Anthropic API. A small SvelteKit frontend ships alongside the
+HTTP API.
 
-1. Add your API keys to `.env`:
-```bash
-cp .env.example .env
-# Edit with your Anthropic, OpenAI, and Cohere keys
-```
+To get started, copy the example environment file and fill in your
+Anthropic, OpenAI, and Cohere keys (`cp .env.example .env`), then bring
+up the stack with `docker-compose up -d`. This starts the FastAPI
+backend, Neo4j, and Redis. The API listens on port 8000, with a health
+check at `/health` and interactive docs at `/docs`.
 
-2. Start services:
-```bash
-docker-compose up -d
-```
+Drop PDFs into `data/raw/` and POST a list of paths to `/ingest`, e.g.
 
-3. Verify it's running:
-```bash
-curl http://localhost:8000/health
-```
+    curl -X POST http://localhost:8000/ingest \
+        -H 'Content-Type: application/json' \
+        -d '{"file_paths": ["/data/raw/notes.pdf"]}'
 
-## Usage
+Files may also be uploaded directly as multipart form data via
+`/ingest/upload`. Once ingestion is complete, ask questions at `/query`
+with a JSON body of the form `{"question": "..."}`; the response
+contains the generated answer along with citations keyed to the chunks
+that supported each claim. The concept graph extracted during ingestion
+can be traversed from any node with `GET /graph/{concept}?depth=N` for
+N between 1 and 4.
 
-### Ingest PDFs
-
-Put PDFs in `data/raw/`, then:
-
-```bash
-curl -X POST http://localhost:8000/ingest \
-  -H "Content-Type: application/json" \
-  -d '{"file_paths": ["/data/raw/your_notes.pdf"]}'
-```
-
-### Ask Questions
-
-```bash
-curl -X POST http://localhost:8000/query \
-  -H "Content-Type: application/json" \
-  -d '{"question": "Explain dynamic programming"}'
-```
-
-### Explore the Graph
-
-```bash
-curl http://localhost:8000/graph/dynamic%20programming?depth=2
-```
-
-### API Docs
-
-http://localhost:8000/docs
-
-## Architecture
-
-```mermaid
-flowchart LR
-    subgraph Ingestion
-        PDF --> Chunks --> Embeddings --> Neo4j[(Neo4j)]
-    end
-
-    subgraph Query
-        Question --> Embed --> Search --> Rerank --> Claude --> Answer
-        Neo4j --> Search
-    end
-```
-
-**Stack**: FastAPI, Neo4j, Redis, OpenAI embeddings, Cohere reranking, Claude
-
-## Local Dev
-
-```bash
-cd backend
-uv sync                           # creates .venv
-uv run pytest                     # run tests
-docker-compose up -d              # run services
-```
+The backend source lives under `backend/` and uses uv for dependency
+management: `uv sync` creates a local `.venv`, and `uv run pytest` runs
+the tests. The frontend is a standard SvelteKit app in `frontend/`;
+`pnpm install` followed by `pnpm dev` will start it against the local
+API.
