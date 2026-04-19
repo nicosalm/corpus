@@ -1,12 +1,6 @@
 Corpus
 ======
 
-> [!NOTE]
-> Corpus organizes your notes as a knowledge graph. On top of vector
-> search and reranking, chunks are linked through the concepts they
-> share, so related material surfaces together and answers stay anchored
-> to the sources that back them.
-
 Corpus is a retrieval-augmented question-answering system for PDF notes.
 It ingests documents into a Neo4j knowledge graph, embeds chunks with
 OpenAI, reranks candidates with Cohere, and generates grounded answers
